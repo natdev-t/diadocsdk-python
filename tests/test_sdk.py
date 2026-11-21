@@ -3,6 +3,7 @@ import inspect
 import json
 import unittest
 from contextlib import asynccontextmanager
+from unittest.mock import patch
 from urllib.parse import parse_qs
 
 import httpx
@@ -12,12 +13,14 @@ from diadoc import (
     STAGING_URL,
     AsyncDiadocClient,
     AsyncOidcClient,
+    AsyncRefreshTokenAuth,
     DiadocClient,
     DiadocHTTPError,
     DiadocProtocolError,
     DiadocTransportError,
     OidcClient,
     OidcError,
+    RefreshTokenAuth,
     proto,
 )
 
@@ -39,6 +42,7 @@ async def open_client(client):
 class SdkTests(unittest.IsolatedAsyncioTestCase):
     diadoc_client = DiadocClient
     oidc_client = OidcClient
+    refresh_auth = RefreshTokenAuth
 
     async def test_latest_routes_and_query_encoding(self):
         requests = []
@@ -223,10 +227,61 @@ class SdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forms[2]["scope"], [f"openid {STAGING_SCOPE}"])
         self.assertEqual(forms[3]["grant_type"], ["urn:ietf:params:oauth:grant-type:device_code"])
 
+    async def test_refresh_token_auth_caches_access_and_preserves_rotated_token(self):
+        exchanged = []
+        saved = []
+        authorization = []
+        now = 0.0
+
+        def identity_response(request):
+            self.assertEqual(request.url.path, "/connect/token")
+            form = parse_qs(request.content.decode("ascii"))
+            exchanged.append(form.pop("refresh_token")[0])
+            self.assertEqual(form, {
+                "grant_type": ["refresh_token"], "client_id": ["client"], "client_secret": ["secret&="],
+            })
+            tokens = {"access_token": f"access-{len(exchanged)}", "expires_in": 120, "token_type": "Bearer"}
+            if len(exchanged) == 1:
+                tokens["refresh_token"] = "rotated"
+            return httpx.Response(200, json=tokens)
+
+        def api_response(request):
+            self.assertEqual(saved, ["rotated"])
+            authorization.append(request.headers["Authorization"])
+            return httpx.Response(401 if request.method == "POST" else 200, json={})
+
+        async def save_async(token):
+            saved.append(token)
+
+        save = save_async if self.refresh_auth is AsyncRefreshTokenAuth else saved.append
+        async with open_client(self.oidc_client(
+            "client", "secret&=", transport=httpx.MockTransport(identity_response),
+        )) as identity:
+            auth = self.refresh_auth(identity, "initial+", save_refresh_token=save)
+            async with open_client(self.diadoc_client(auth=auth, transport=httpx.MockTransport(api_response))) as api:
+                with patch("diadoc.oidc.monotonic", side_effect=lambda: now):
+                    self.assertEqual(exchanged, [])
+                    await resolve(api.get_my_organizations())
+                    await resolve(api.request("GET", "/custom", headers={"authorization": "Bearer override"}))
+                    await resolve(api.request("GET", "/custom"))
+                    now = 61.0
+                    with self.assertRaises(DiadocHTTPError) as caught:
+                        await resolve(api.post_message({"FromBoxId": "box"}))
+                    self.assertEqual(caught.exception.status_code, 401)
+                    now = 122.0
+                    await resolve(api.get_my_organizations())
+
+        self.assertEqual(auth.refresh_token, "rotated")
+        self.assertEqual(exchanged, ["initial+", "rotated", "rotated"])
+        self.assertEqual(authorization, [
+            "Bearer access-1", "Bearer override", "Bearer access-1", "Bearer access-2", "Bearer access-3",
+        ])
+
 
 class AsyncSdkTests(SdkTests):
     diadoc_client = AsyncDiadocClient
     oidc_client = AsyncOidcClient
+    refresh_auth = AsyncRefreshTokenAuth
 
 
 class AsyncLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -266,6 +321,38 @@ class AsyncLifecycleTests(unittest.IsolatedAsyncioTestCase):
                             await task
                     self.assertTrue(cancelled.is_set())
                     self.assertEqual(await call(), {"access_token": "token"})
+
+    async def test_concurrent_refresh_retries_saving_a_rotated_token(self):
+        exchanges = []
+        saves = []
+        sent = []
+
+        async def identity_response(request):
+            exchanges.append(request)
+            await asyncio.sleep(0)
+            return httpx.Response(200, json={"access_token": "access", "expires_in": 120, "refresh_token": "new"})
+
+        async def save(token):
+            saves.append(token)
+            if len(saves) == 1:
+                raise OSError("secret store unavailable")
+
+        def api_response(request):
+            sent.append(request.headers["Authorization"])
+            return httpx.Response(200, json={})
+
+        async with AsyncOidcClient("client", "secret", transport=httpx.MockTransport(identity_response)) as identity:
+            auth = AsyncRefreshTokenAuth(identity, "old", save_refresh_token=save)
+            async with AsyncDiadocClient(auth=auth, transport=httpx.MockTransport(api_response)) as api:
+                results = await asyncio.gather(
+                    api.get_my_organizations(), api.get_my_organizations(), return_exceptions=True,
+                )
+
+        self.assertIsInstance(results[0], OSError)
+        self.assertEqual(results[1], {})
+        self.assertEqual(len(exchanges), 1)
+        self.assertEqual(saves, ["new", "new"])
+        self.assertEqual(sent, ["Bearer access"])
 
     async def test_timeout_configuration_and_error_cause(self):
         timeout = httpx.Timeout(5, connect=1, read=2, write=3, pool=4)

@@ -169,12 +169,13 @@ class _Client(_ClientBase[httpx.Client]):
         response_format: Literal["json", "protobuf"] = "json",
         timeout: float | httpx.Timeout = 30.0,
         transport: httpx.BaseTransport | None = None,
+        auth: httpx.Auth | None = None,
     ) -> None:
         super().__init__(
             access_token, base_url=base_url, developer_key=developer_key, legacy_token=legacy_token,
             response_format=response_format,
         )
-        self._http = httpx.Client(timeout=timeout, transport=transport)
+        self._http = httpx.Client(timeout=timeout, transport=transport, auth=auth)
 
     def __enter__(self: _ClientT) -> _ClientT:
         return self
@@ -223,12 +224,13 @@ class _AsyncClient(_ClientBase[httpx.AsyncClient]):
         response_format: Literal["json", "protobuf"] = "json",
         timeout: float | httpx.Timeout = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        auth: httpx.Auth | None = None,
     ) -> None:
         super().__init__(
             access_token, base_url=base_url, developer_key=developer_key, legacy_token=legacy_token,
             response_format=response_format,
         )
-        self._http = httpx.AsyncClient(timeout=timeout, transport=transport)
+        self._http = httpx.AsyncClient(timeout=timeout, transport=transport, auth=auth)
 
     async def __aenter__(self: _AsyncClientT) -> _AsyncClientT:
         await self._http.__aenter__()

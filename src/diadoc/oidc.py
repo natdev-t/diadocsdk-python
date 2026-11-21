@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from asyncio import Lock as AsyncLock
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterable
+from threading import Lock
+from time import monotonic
 from types import TracebackType
 from typing import Generic, TypedDict, cast
 
@@ -152,7 +155,7 @@ class OidcClient(_OidcBase[httpx.Client]):
         return _decode_token(self._send(self._exchange_code_request(code, redirect_uri)))
 
     def refresh(self, refresh_token: str) -> TokenResponse:
-        """Exchange a refresh token. Persist the new refresh token returned by Identity."""
+        """Exchange a refresh token. Persist the new refresh token if Identity returns one."""
         return _decode_token(self._send(self._refresh_request(refresh_token)))
 
     def start_device_authorization(self) -> DeviceAuthorization:
@@ -203,7 +206,7 @@ class AsyncOidcClient(_OidcBase[httpx.AsyncClient]):
         return _decode_token(await self._send(self._exchange_code_request(code, redirect_uri)))
 
     async def refresh(self, refresh_token: str) -> TokenResponse:
-        """Exchange a refresh token. Persist the new refresh token returned by Identity."""
+        """Exchange a refresh token. Persist the new refresh token if Identity returns one."""
         return _decode_token(await self._send(self._refresh_request(refresh_token)))
 
     async def start_device_authorization(self) -> DeviceAuthorization:
@@ -215,3 +218,91 @@ class AsyncOidcClient(_OidcBase[httpx.AsyncClient]):
 
     async def _send(self, request: httpx.Request) -> httpx.Response:
         return await async_send(self._http, request, OidcError)
+
+
+class _RefreshTokenAuth(httpx.Auth):
+    def __init__(self, refresh_token: str) -> None:
+        if not refresh_token:
+            raise ValueError("refresh_token must be non-empty")
+        self._refresh_token = self._saved_refresh_token = refresh_token
+        self._access_token = ""
+        self._refresh_at = float("-inf")
+
+    @property
+    def refresh_token(self) -> str:
+        """The latest refresh token, including any token returned by Identity."""
+        return self._refresh_token
+
+    def _cache_tokens(self, tokens: TokenResponse, started_at: float) -> None:
+        refresh_token = tokens.get("refresh_token")
+        if isinstance(refresh_token, str) and refresh_token:
+            self._refresh_token = refresh_token
+        expires_in = tokens.get("expires_in")
+        lifetime = max(0, expires_in) if type(expires_in) is int else 0
+        self._refresh_at = started_at + lifetime - min(60, lifetime / 2)
+        self._access_token = tokens["access_token"]
+
+
+class RefreshTokenAuth(_RefreshTokenAuth):
+    """Use a refresh token to authorize DiadocClient requests."""
+
+    def __init__(
+        self,
+        identity: OidcClient,
+        refresh_token: str,
+        *,
+        save_refresh_token: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(refresh_token)
+        self._identity = identity
+        self._save_refresh_token = save_refresh_token
+        self._lock = Lock()
+
+    def _save(self) -> None:
+        if self._save_refresh_token is not None and self.refresh_token != self._saved_refresh_token:
+            self._save_refresh_token(self.refresh_token)
+            self._saved_refresh_token = self.refresh_token
+
+    def sync_auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        if "Authorization" not in request.headers:
+            with self._lock:
+                self._save()
+                started_at = monotonic()
+                if started_at >= self._refresh_at:
+                    self._cache_tokens(self._identity.refresh(self.refresh_token), started_at)
+                    self._save()
+                request.headers["Authorization"] = f"Bearer {self._access_token}"
+        yield request
+
+
+class AsyncRefreshTokenAuth(_RefreshTokenAuth):
+    """Use a refresh token to authorize AsyncDiadocClient requests."""
+
+    def __init__(
+        self,
+        identity: AsyncOidcClient,
+        refresh_token: str,
+        *,
+        save_refresh_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        super().__init__(refresh_token)
+        self._identity = identity
+        self._save_refresh_token = save_refresh_token
+        self._lock = AsyncLock()
+
+    async def _save(self) -> None:
+        if self._save_refresh_token is not None and self.refresh_token != self._saved_refresh_token:
+            await self._save_refresh_token(self.refresh_token)
+            self._saved_refresh_token = self.refresh_token
+
+    async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        if "Authorization" not in request.headers:
+            async with self._lock:
+                await self._save()
+                started_at = monotonic()
+                if started_at >= self._refresh_at:
+                    tokens = await self._identity.refresh(self.refresh_token)
+                    self._cache_tokens(tokens, started_at)
+                    await self._save()
+                request.headers["Authorization"] = f"Bearer {self._access_token}"
+        yield request

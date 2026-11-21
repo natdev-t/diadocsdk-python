@@ -25,18 +25,24 @@ with DiadocClient(os.environ["DIADOC_ACCESS_TOKEN"]) as api:
 
 ## Авторизация через Контур ID
 
+Для Refresh Token Flow выберите `AuthorizationCode` в настройке `clientMode` в Кабинете интегратора. В разделе «Выпуск токенов» выберите `offline_access` и `Diadoc.PublicAPI` (или `Diadoc.PublicAPI.Staging` для тестовой площадки), подтвердите доступ от имени нужной учетной записи и получите refresh-токен. В `DIADOC_CLIENT_SECRET` передайте API-ключ приложения. [Настройка Refresh Token Flow](https://developer.kontur.ru/doc/diadoc-api/authentication#refresh_flow)
+
 ```python
 import os
 
-from diadoc import DiadocClient, OidcClient
+from diadoc import DiadocClient, OidcClient, RefreshTokenAuth
 
 with OidcClient(os.environ["DIADOC_CLIENT_ID"], os.environ["DIADOC_CLIENT_SECRET"]) as identity:
-    tokens = identity.refresh(os.environ["DIADOC_REFRESH_TOKEN"])
-    # Сохраните tokens["refresh_token"] в хранилище секретов до следующего обмена.
-
-with DiadocClient(tokens["access_token"]) as api:
-    organizations = api.get_my_organizations()
+    auth = RefreshTokenAuth(identity, os.environ["DIADOC_REFRESH_TOKEN"])
+    with DiadocClient(auth=auth) as api:
+        organizations = api.get_my_organizations()
 ```
+
+`RefreshTokenAuth` получает `access_token` при первом запросе и обновляет его заранее по `expires_in` при следующих вызовах. Используйте один объект `auth` для запросов с одной учетной записью. Если Контур вернет новый `refresh_token`, он будет доступен в `auth.refresh_token` и использован при следующем обмене. Чтобы пережить перезапуск, передайте `save_refresh_token=...` с функцией записи токена в ваше хранилище секретов и при запуске загружайте сохраненное значение. Ошибка записи прерывает запрос к Диадоку. При следующем запросе SDK повторит запись того же токена.
+
+Обмен происходит при вызовах API. Если refresh-токен из Кабинета интегратора не использовать 30 дней, срок его действия истечет. [Срок действия токенов](https://developer.kontur.ru/doc/diadoc-api/authentication#refresh_flow)
+
+Для разового обмена вызовите `identity.refresh(refresh_token)` и передайте `tokens["access_token"]` в `DiadocClient`. Если ответ содержит новый `refresh_token`, сохраните его для следующего обмена.
 
 Для Authorization Code Flow используйте `authorization_url(redirect_uri, state=...)`, проверьте `state` в обработчике перенаправления и вызовите `exchange_code(code, redirect_uri)`. Для Device Authorization Flow вызовите `start_device_authorization()`, покажите пользователю `verification_uri` и `user_code`, затем опрашивайте `poll_device_token(device_code)` с учетом `interval` и `expires_in`. Причина отказа, например `authorization_pending` или `slow_down`, доступна в `OidcError.error`. Для интеграций со старым токеном клиент принимает пару `developer_key` и `legacy_token` и предоставляет `authenticate_v3` и `authenticate_confirm_v3`. [Документация авторизации](https://developer.kontur.ru/doc/diadoc-api/authentication)
 
@@ -48,23 +54,21 @@ with DiadocClient(tokens["access_token"]) as api:
 import asyncio
 import os
 
-from diadoc import AsyncDiadocClient, AsyncOidcClient
+from diadoc import AsyncDiadocClient, AsyncOidcClient, AsyncRefreshTokenAuth
 
 
 async def main():
     async with AsyncOidcClient(os.environ["DIADOC_CLIENT_ID"], os.environ["DIADOC_CLIENT_SECRET"]) as identity:
-        tokens = await identity.refresh(os.environ["DIADOC_REFRESH_TOKEN"])
-        # Сохраните tokens["refresh_token"] в хранилище секретов до следующего обмена.
-
-    async with AsyncDiadocClient(tokens["access_token"], timeout=15.0) as api:
-        organizations = await api.get_my_organizations()
-        print(organizations["Organizations"])
+        auth = AsyncRefreshTokenAuth(identity, os.environ["DIADOC_REFRESH_TOKEN"])
+        async with AsyncDiadocClient(auth=auth, timeout=15.0) as api:
+            organizations = await api.get_my_organizations()
+            print(organizations["Organizations"])
 
 
 asyncio.run(main())
 ```
 
-`async with` закрывает соединения при выходе. При ручном управлении клиентом вызовите `await client.aclose()`. Передайте `timeout` в секундах или объект `httpx.Timeout`. Таймаут поднимает `DiadocTransportError` с исходным исключением HTTPX в `__cause__`. При отмене задачи `asyncio` вызов прерывается с `asyncio.CancelledError`.
+В `AsyncRefreshTokenAuth` передавайте асинхронную функцию `save_refresh_token`. `async with` закрывает соединения при выходе. При ручном управлении клиентом вызовите `await client.aclose()`. Передайте `timeout` в секундах или объект `httpx.Timeout`. Таймаут поднимает `DiadocTransportError` с исходным исключением HTTPX в `__cause__`. При отмене задачи `asyncio` вызов прерывается с `asyncio.CancelledError`.
 
 ## Документы и файлы
 
@@ -111,7 +115,7 @@ with DiadocClient(os.environ["DIADOC_ACCESS_TOKEN"], response_format="protobuf")
 
 Методы для PDF, XML и бинарных вложений возвращают `bytes`. Для доступа к имени файла и другим заголовкам передайте `raw=True` и используйте свойства `httpx.Response`. Ответы `204` и пустые ответы с `Retry-After` возвращают `None` при обычном вызове. Для маршрутов вне встроенного списка доступен `request(method, path, params=..., headers=..., content=...)`.
 
-При ошибке HTTP клиент поднимает `DiadocHTTPError` со статусом, кодом Диадока, `Retry-After` и исходным ответом. Ошибки сети и декодирования доступны как `DiadocTransportError` и `DiadocProtocolError`. Повтор запроса и обновление токена инициирует приложение.
+При ошибке HTTP клиент поднимает `DiadocHTTPError` со статусом, кодом Диадока, `Retry-After` и исходным ответом. Ошибки сети и декодирования доступны как `DiadocTransportError` и `DiadocProtocolError`. Повтор запроса инициирует приложение.
 
 ## Разработка
 
