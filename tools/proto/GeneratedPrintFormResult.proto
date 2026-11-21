@@ -1,0 +1,17 @@
+syntax = "proto2";
+
+package Diadoc.Api.Proto.Print;
+
+enum PrintOperationStatus {
+  Unknown = 0;
+  InProgress = 1;
+  Success = 2;
+  Failed = 3;
+  Cancelled = 4;
+}
+
+message GeneratedPrintFormResult {
+  required PrintOperationStatus OperationStatus = 1;
+  repeated string Files = 2;
+  repeated string Errors = 3;
+}
