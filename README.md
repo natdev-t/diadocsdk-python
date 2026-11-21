@@ -1,6 +1,6 @@
 # Диадок SDK для Python
 
-Синхронный клиент Контур.Диадока для Python 3.10 и новее. Включает 131 HTTP-операцию для работы с организациями, контрагентами, документами, сообщениями, событиями, доверенностями, печатными формами и полкой документов.
+Синхронный и асинхронный клиенты Контур.Диадока для Python 3.10 и новее. Каждый включает 131 HTTP-операцию для работы с организациями, контрагентами, документами, сообщениями, событиями, доверенностями, печатными формами и полкой документов.
 
 ## Установка
 
@@ -39,6 +39,32 @@ with DiadocClient(tokens["access_token"]) as api:
 ```
 
 Для Authorization Code Flow используйте `authorization_url(redirect_uri, state=...)`, проверьте `state` в обработчике перенаправления и вызовите `exchange_code(code, redirect_uri)`. Для Device Authorization Flow вызовите `start_device_authorization()`, покажите пользователю `verification_uri` и `user_code`, затем опрашивайте `poll_device_token(device_code)` с учетом `interval` и `expires_in`. Причина отказа, например `authorization_pending` или `slow_down`, доступна в `OidcError.error`. Для интеграций со старым токеном клиент принимает пару `developer_key` и `legacy_token` и предоставляет `authenticate_v3` и `authenticate_confirm_v3`. [Документация авторизации](https://developer.kontur.ru/doc/diadoc-api/authentication)
+
+## Асинхронные клиенты
+
+`AsyncDiadocClient` и `AsyncOidcClient` используют `httpx.AsyncClient`. Сетевые методы сохраняют имена, параметры и типы результатов синхронных методов. Вызывайте их через `await`. Метод `authorization_url()` только формирует URL и вызывается синхронно.
+
+```python
+import asyncio
+import os
+
+from diadoc import AsyncDiadocClient, AsyncOidcClient
+
+
+async def main():
+    async with AsyncOidcClient(os.environ["DIADOC_CLIENT_ID"], os.environ["DIADOC_CLIENT_SECRET"]) as identity:
+        tokens = await identity.refresh(os.environ["DIADOC_REFRESH_TOKEN"])
+        # Сохраните tokens["refresh_token"] в хранилище секретов до следующего обмена.
+
+    async with AsyncDiadocClient(tokens["access_token"], timeout=15.0) as api:
+        organizations = await api.get_my_organizations()
+        print(organizations["Organizations"])
+
+
+asyncio.run(main())
+```
+
+`async with` закрывает соединения при выходе. При ручном управлении клиентом вызовите `await client.aclose()`. Передайте `timeout` в секундах или объект `httpx.Timeout`. Таймаут поднимает `DiadocTransportError` с исходным исключением HTTPX в `__cause__`. При отмене задачи `asyncio` вызов прерывается с `asyncio.CancelledError`.
 
 ## Документы и файлы
 
@@ -94,7 +120,7 @@ python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-Методы и Protobuf-дескриптор сгенерированы из OpenAPI и схем C# SDK. Каталог методов дополняет выгрузку OpenAPI. Реализация маршрутов и параметров также сверена с SDK для Java. [OpenAPI](https://developer.kontur.ru/doc/diadoc-api/api/diadoc-api.json) · [каталог API](https://developer.kontur.ru/doc/diadoc-api/methods) · [схемы C# SDK](https://github.com/diadoc/diadocsdk-csharp/tree/e3a701f992cbf7f59fd73e9a2ac32907d8e9e5e6/proto) · [Java SDK](https://github.com/diadoc/diadocsdk-java)
+Синхронные и асинхронные методы Диадока генерируются из общего описания операций OpenAPI с дополнениями из каталога API. Protobuf-дескриптор собирается из схем C# SDK. Маршруты и параметры также сверены с SDK для Java. [OpenAPI](https://developer.kontur.ru/doc/diadoc-api/api/diadoc-api.json) · [каталог API](https://developer.kontur.ru/doc/diadoc-api/methods) · [схемы C# SDK](https://github.com/diadoc/diadocsdk-csharp/tree/e3a701f992cbf7f59fd73e9a2ac32907d8e9e5e6/proto) · [Java SDK](https://github.com/diadoc/diadocsdk-java)
 
 Для повторной генерации используйте OpenAPI-выгрузку и ZIP-архив C# SDK. Версии источников записаны в начале `src/diadoc/_methods.py`. Флаг `--check` сверяет результат с файлами в пакете.
 

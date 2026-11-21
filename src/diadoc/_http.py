@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
+
+_HttpClientT = TypeVar("_HttpClientT", httpx.Client, httpx.AsyncClient)
 
 
 class DiadocError(Exception):
@@ -42,14 +44,32 @@ def parse_base_url(value: str) -> httpx.URL:
     return url
 
 
-def send(client: httpx.Client, method: str, url: httpx.URL, **kwargs: Any) -> httpx.Response:
+def send(
+    client: httpx.Client, request: httpx.Request, error_type: type[DiadocHTTPError] = DiadocHTTPError,
+) -> httpx.Response:
     try:
-        response = client.request(method, url, **kwargs)
+        response = client.send(request)
     except httpx.RequestError as error:
-        raise DiadocTransportError(f"{type(error).__name__} for {method} {url.path}") from error
+        raise _transport_error(request, error) from error
     if not response.is_success:
-        raise DiadocHTTPError(response)
+        raise error_type(response)
     return response
+
+
+async def async_send(
+    client: httpx.AsyncClient, request: httpx.Request, error_type: type[DiadocHTTPError] = DiadocHTTPError,
+) -> httpx.Response:
+    try:
+        response = await client.send(request)
+    except httpx.RequestError as error:
+        raise _transport_error(request, error) from error
+    if not response.is_success:
+        raise error_type(response)
+    return response
+
+
+def _transport_error(request: httpx.Request, error: httpx.RequestError) -> DiadocTransportError:
+    return DiadocTransportError(f"{type(error).__name__} for {request.method} {request.url.path}")
 
 
 def decode_json(response: httpx.Response) -> Any:

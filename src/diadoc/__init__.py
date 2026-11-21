@@ -3,10 +3,12 @@
 from . import proto
 from ._client import PRODUCTION_URL, STAGING_URL
 from ._http import DiadocError, DiadocHTTPError, DiadocProtocolError, DiadocTransportError
-from ._methods import DiadocClient
-from .oidc import IDENTITY_URL, PRODUCTION_SCOPE, STAGING_SCOPE, OidcClient, OidcError
+from ._methods import AsyncDiadocClient, DiadocClient
+from .oidc import IDENTITY_URL, PRODUCTION_SCOPE, STAGING_SCOPE, AsyncOidcClient, OidcClient, OidcError
 
 __all__ = [
+    "AsyncDiadocClient",
+    "AsyncOidcClient",
     "DiadocClient",
     "DiadocError",
     "DiadocHTTPError",
